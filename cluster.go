@@ -196,15 +196,24 @@ func (n *clusterNode) updateLatency() {
 	const numProbe = 10
 	var dur uint64
 
-	for i := 0; i < numProbe; i++ {
+	var i int
+	for i = 0; i < numProbe; i++ {
 		time.Sleep(time.Duration(10+rand.Intn(10)) * time.Millisecond)
 
 		start := time.Now()
-		n.Client.Ping(context.TODO())
+		cmd := n.Client.Ping(context.TODO())
+		// sometimes failures can be really fast and actually make them the fastest node
+		if cmd.err != nil {
+			if isLoadingError(cmd.err) || isConnectionError(cmd.err) {
+				internal.Logger.Printf(context.Background(), "latency marking as failing %s %s", n.String(), cmd.err)
+				n.MarkAsFailing()
+				break
+			}
+		}
 		dur += uint64(time.Since(start) / time.Microsecond)
 	}
 
-	latency := float64(dur) / float64(numProbe)
+	latency := float64(dur) / float64(i+1)
 	atomic.StoreUint32(&n.latency, uint32(latency+0.5))
 }
 
@@ -564,6 +573,10 @@ func (c *clusterState) slotClosestNode(slot int) (*clusterNode, error) {
 		return c.nodes.Random()
 	}
 
+	if len(nodes) == 1 {
+		return nodes[0], nil
+	}
+
 	var node *clusterNode
 	for _, n := range nodes {
 		if n.Failing() {
@@ -577,6 +590,7 @@ func (c *clusterState) slotClosestNode(slot int) (*clusterNode, error) {
 		return node, nil
 	}
 
+	internal.Logger.Printf(context.Background(), "no healthy nodes choosing random")
 	// If all nodes are failing - return random node
 	return c.nodes.Random()
 }
@@ -763,7 +777,6 @@ func (c *ClusterClient) process(ctx context.Context, cmd Cmder) error {
 				return err
 			}
 		}
-
 		if node == nil {
 			var err error
 			node, err = c.cmdNode(ctx, cmdInfo, slot)
@@ -1101,6 +1114,13 @@ func (c *ClusterClient) _processPipeline(ctx context.Context, cmds []Cmder) erro
 				if err == nil {
 					return
 				}
+				if c.opt.ReadOnly && isConnectionError(err) {
+					// TODO maybe not the best place for this? effective tho
+					internal.Logger.Printf(c.Context(), "mark connection as failing %s %s attempt %d", node.String(), err.Error(), attempt)
+					node.MarkAsFailing()
+				} else {
+					internal.Logger.Printf(ctx, "there's an error %s, %s, failing: %t, attempt %d", node.String(), err.Error(), node.Failing(), attempt)
+				}
 				if attempt < c.opt.MaxRedirects {
 					if err := c.mapCmdsByNode(ctx, failedCmds, cmds); err != nil {
 						setCmdsErr(cmds, err)
@@ -1199,6 +1219,7 @@ func (c *ClusterClient) pipelineReadCmds(
 		}
 
 		if c.opt.ReadOnly && isLoadingError(err) {
+			internal.Logger.Printf(c.Context(), "mark loading as failing %s %t %s", node.String(), c.opt.ReadOnly, err.Error())
 			node.MarkAsFailing()
 			return err
 		}
