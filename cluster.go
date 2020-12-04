@@ -21,6 +21,8 @@ import (
 
 var errClusterNoNodes = fmt.Errorf("redis: cluster has no nodes")
 
+const maxLatency = math.MaxUint32
+
 // ClusterOptions are used to configure a cluster client and should be
 // passed to NewClusterClient.
 type ClusterOptions struct {
@@ -57,6 +59,11 @@ type ClusterOptions struct {
 
 	OnConnect func(ctx context.Context, cn *Conn) error
 
+	// A function to call during updateLatency instead of the default (ping) to do a more in depth health check
+	LatencyHealthFunc func(c *Client) bool
+	// A function to call after a command is executed to be more strict in marking a node unhealthy on a node
+	OnErrFunc func(n NodeExt, err error)
+
 	Username string
 	Password string
 
@@ -77,6 +84,12 @@ type ClusterOptions struct {
 	IdleCheckFrequency time.Duration
 
 	TLSConfig *tls.Config
+}
+
+// NodeExt exposes some methods for a node to an external client for callback
+type NodeExt interface {
+	fmt.Stringer
+	MarkAsFailing()
 }
 
 func (opt *ClusterOptions) init() {
@@ -131,7 +144,7 @@ func (opt *ClusterOptions) init() {
 func (opt *ClusterOptions) clientOptions() *Options {
 	const disableIdleCheck = -1
 
-	return &Options{
+	o := &Options{
 		Dialer:    opt.Dialer,
 		OnConnect: opt.OnConnect,
 
@@ -160,7 +173,13 @@ func (opt *ClusterOptions) clientOptions() *Options {
 		// READONLY command against that node -- setting readOnly to false in such
 		// situations in the options below will prevent that from happening.
 		readOnly: opt.ReadOnly && opt.ClusterSlots == nil,
+
+		LatencyHealthFunc: opt.LatencyHealthFunc,
 	}
+	if o.LatencyHealthFunc == nil {
+		o.LatencyHealthFunc = defaultLatencyFunc
+	}
+	return o
 }
 
 //------------------------------------------------------------------------------
@@ -180,7 +199,7 @@ func newClusterNode(clOpt *ClusterOptions, addr string) *clusterNode {
 		Client: clOpt.NewClient(opt),
 	}
 
-	node.latency = math.MaxUint32
+	node.latency = maxLatency
 	if clOpt.RouteByLatency {
 		go node.updateLatency()
 	}
@@ -196,28 +215,36 @@ func (n *clusterNode) Close() error {
 	return n.Client.Close()
 }
 
+type CNode interface {
+	Client() *Client
+}
+
+// latency funcs return true if alls well, false if they should be marked as failing
+func defaultLatencyFunc(c *Client) bool {
+	cmd := c.Ping(context.Background())
+	if isLoadingError(cmd.err) {
+		return false
+	}
+	return true
+}
+
 func (n *clusterNode) updateLatency() {
 	const numProbe = 10
 	var dur uint64
 
-	var i int
-	for i = 0; i < numProbe; i++ {
+	for i := 0; i < numProbe; i++ {
 		time.Sleep(time.Duration(10+rand.Intn(10)) * time.Millisecond)
 
 		start := time.Now()
-		cmd := n.Client.Ping(context.TODO())
-		// sometimes failures can be really fast and actually make them the fastest node
-		if cmd.err != nil {
-			if isLoadingError(cmd.err) || isConnectionError(cmd.err) {
-				internal.Logger.Printf(context.Background(), "latency marking as failing %s %s", n.String(), cmd.err)
-				n.MarkAsFailing()
-				break
-			}
+		if !n.Client.Options().LatencyHealthFunc(n.Client) {
+			n.MarkAsFailing()
+			atomic.StoreUint32(&n.latency, maxLatency) // turn latency way up
+			return
 		}
 		dur += uint64(time.Since(start) / time.Microsecond)
 	}
 
-	latency := float64(dur) / float64(i+1)
+	latency := float64(dur) / float64(numProbe)
 	atomic.StoreUint32(&n.latency, uint32(latency+0.5))
 }
 
@@ -1120,12 +1147,8 @@ func (c *ClusterClient) _processPipeline(ctx context.Context, cmds []Cmder) erro
 				if err == nil {
 					return
 				}
-				if c.opt.ReadOnly && isConnectionError(err) {
-					// TODO maybe not the best place for this? effective tho
-					internal.Logger.Printf(c.Context(), "mark connection as failing %s %s attempt %d", node.String(), err.Error(), attempt)
-					node.MarkAsFailing()
-				} else {
-					internal.Logger.Printf(ctx, "there's an error %s, %s, failing: %t, attempt %d", node.String(), err.Error(), node.Failing(), attempt)
+				if c.opt.ReadOnly && c.opt.OnErrFunc != nil {
+					c.opt.OnErrFunc(node, err)
 				}
 				if attempt < c.opt.MaxRedirects {
 					if err := c.mapCmdsByNode(ctx, failedCmds, cmds); err != nil {
@@ -1215,7 +1238,6 @@ func (c *ClusterClient) pipelineReadCmds(
 	for _, cmd := range cmds {
 		err := cmd.readReply(rd)
 		cmd.SetErr(err)
-
 		if err == nil {
 			continue
 		}
