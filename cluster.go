@@ -218,7 +218,7 @@ type CNode interface {
 // latency funcs return true if alls well, false if they should be marked as failing
 func defaultLatencyFunc(c *Client) bool {
 	cmd := c.Ping(context.Background())
-	if isLoadingError(cmd.err) {
+	if cmd.err != nil && isLoadingError(cmd.err) {
 		return false
 	}
 	return true
