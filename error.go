@@ -107,20 +107,8 @@ func isMovedError(err error) (moved bool, ask bool, addr string) {
 	return
 }
 
-func isConnectionError(err error) bool {
-	return isConnectionRefused(err) || isIOTimeout(err)
-}
-
 func isLoadingError(err error) bool {
 	return strings.HasPrefix(err.Error(), "LOADING ")
-}
-
-func isIOTimeout(err error) bool {
-	return strings.HasSuffix(err.Error(), "i/o timeout")
-}
-
-func isConnectionRefused(err error) bool {
-	return strings.HasSuffix(err.Error(), "connection refused")
 }
 
 func isReadOnlyError(err error) bool {
