@@ -99,7 +99,7 @@ func (opt *ClusterOptions) init() {
 		opt.MaxRedirects = 3
 	}
 
-	if (opt.RouteByLatency || opt.RouteRandomly) && opt.ClusterSlots == nil {
+	if opt.RouteByLatency || opt.RouteRandomly {
 		opt.ReadOnly = true
 	}
 
@@ -166,15 +166,24 @@ func (opt *ClusterOptions) clientOptions() *Options {
 		IdleTimeout:        opt.IdleTimeout,
 		IdleCheckFrequency: disableIdleCheck,
 
-		readOnly: opt.ReadOnly,
-
 		TLSConfig: opt.TLSConfig,
 
 		LatencyHealthFunc: opt.LatencyHealthFunc,
 	}
+
 	if o.LatencyHealthFunc == nil {
 		o.LatencyHealthFunc = defaultLatencyFunc
 	}
+
+	// If ClusterSlots is populated, then we probably have an artificial
+	// cluster whose nodes are not in clustering mode (otherwise there isn't
+	// much use for ClusterSlots config).  This means we cannot execute the
+	// READONLY command against that node -- setting readOnly to false in such
+	// situations in the options below will prevent that from happening.
+	if opt.ReadOnly && opt.ClusterSlots == nil {
+		o.readOnly = true
+	}
+
 	return o
 }
 
