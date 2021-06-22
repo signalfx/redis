@@ -1026,7 +1026,7 @@ var _ = Describe("ClusterClient", func() {
 			failover = true
 
 			opt = redisClusterOptions()
-			opt.ReadOnly = true
+			opt.ReadOnly = redis.PtrBool(true)
 			opt.ClusterSlots = func(ctx context.Context) ([]redis.ClusterSlot, error) {
 				slots := []redis.ClusterSlot{{
 					Start: 0,
