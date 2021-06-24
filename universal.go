@@ -71,7 +71,7 @@ func (o *UniversalOptions) Cluster() *ClusterOptions {
 		Password: o.Password,
 
 		MaxRedirects:   o.MaxRedirects,
-		ReadOnly:       &o.ReadOnly,
+		ReadOnly:       o.ReadOnly,
 		RouteByLatency: o.RouteByLatency,
 		RouteRandomly:  o.RouteRandomly,
 
