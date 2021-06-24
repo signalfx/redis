@@ -38,12 +38,12 @@ type ClusterOptions struct {
 	MaxRedirects int
 
 	// Enables read-only commands on slave nodes.
-	ReadOnly bool
+	ReadOnly *bool
 	// Allows routing read-only commands to the closest master or slave node.
-	// It automatically enables ReadOnly.
+	// It automatically enables ReadOnly unless explicitly set to false.
 	RouteByLatency bool
 	// Allows routing read-only commands to the random master or slave node.
-	// It automatically enables ReadOnly.
+	// It automatically enables ReadOnly unless explicitly set to false.
 	RouteRandomly bool
 
 	// Optional function that returns cluster slots information.
@@ -99,8 +99,12 @@ func (opt *ClusterOptions) init() {
 		opt.MaxRedirects = 3
 	}
 
-	if opt.RouteByLatency || opt.RouteRandomly {
-		opt.ReadOnly = true
+	if opt.ReadOnly == nil {
+		opt.ReadOnly = PtrBool(opt.RouteByLatency || opt.RouteRandomly)
+	}
+
+	if opt.ReadOnly == nil {
+		opt.ReadOnly = PtrBool(false)
 	}
 
 	if opt.PoolSize == 0 {
@@ -172,7 +176,7 @@ func (opt *ClusterOptions) clientOptions() *Options {
 		// much use for ClusterSlots config).  This means we cannot execute the
 		// READONLY command against that node -- setting readOnly to false in such
 		// situations in the options below will prevent that from happening.
-		readOnly: opt.ReadOnly && opt.ClusterSlots == nil,
+		readOnly: *opt.ReadOnly && opt.ClusterSlots == nil,
 
 		LatencyHealthFunc: opt.LatencyHealthFunc,
 	}
@@ -842,7 +846,7 @@ func (c *ClusterClient) process(ctx context.Context, cmd Cmder) error {
 		}
 
 		// If slave is loading - pick another node.
-		if c.opt.ReadOnly && isLoadingError(lastErr) {
+		if *c.opt.ReadOnly && isLoadingError(lastErr) {
 			node.MarkAsFailing()
 			node = nil
 			continue
@@ -1147,7 +1151,7 @@ func (c *ClusterClient) _processPipeline(ctx context.Context, cmds []Cmder) erro
 				if err == nil {
 					return
 				}
-				if c.opt.ReadOnly && c.opt.OnErrFunc != nil {
+				if *c.opt.ReadOnly && c.opt.OnErrFunc != nil {
 					c.opt.OnErrFunc(node, err)
 				}
 				if attempt < c.opt.MaxRedirects {
@@ -1176,7 +1180,7 @@ func (c *ClusterClient) mapCmdsByNode(ctx context.Context, cmdsMap *cmdsMap, cmd
 		return err
 	}
 
-	if c.opt.ReadOnly && c.cmdsAreReadOnly(cmds) {
+	if *c.opt.ReadOnly && c.cmdsAreReadOnly(cmds) {
 		for _, cmd := range cmds {
 			slot := c.cmdSlot(cmd)
 			node, err := c.slotReadOnlyNode(state, slot)
@@ -1246,7 +1250,7 @@ func (c *ClusterClient) pipelineReadCmds(
 			continue
 		}
 
-		if c.opt.ReadOnly && isLoadingError(err) {
+		if *c.opt.ReadOnly && isLoadingError(err) {
 			internal.Logger.Printf(c.Context(), "mark loading as failing %s %t %s", node.String(), c.opt.ReadOnly, err.Error())
 			node.MarkAsFailing()
 			return err
@@ -1684,7 +1688,7 @@ func (c *ClusterClient) cmdNode(
 		return nil, err
 	}
 
-	if c.opt.ReadOnly && cmdInfo != nil && cmdInfo.ReadOnly {
+	if *c.opt.ReadOnly && cmdInfo != nil && cmdInfo.ReadOnly {
 		return c.slotReadOnlyNode(state, slot)
 	}
 	return state.slotMasterNode(slot)
@@ -1776,4 +1780,8 @@ func (m *cmdsMap) Add(node *clusterNode, cmds ...Cmder) {
 	m.mu.Lock()
 	m.m[node] = append(m.m[node], cmds...)
 	m.mu.Unlock()
+}
+
+func PtrBool(b bool) *bool {
+	return &b
 }
